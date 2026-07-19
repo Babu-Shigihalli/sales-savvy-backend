@@ -1,4 +1,4 @@
-package com.salessavvy.sales_savvy_backend.entity;
+package sales_savvy_backend.entity;
 
 import jakarta.persistence.*;
 import lombok.Getter;

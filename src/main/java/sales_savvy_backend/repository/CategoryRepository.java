@@ -1,6 +1,6 @@
-package com.salessavvy.sales_savvy_backend.repository;
+package sales_savvy_backend.repository;
 
-import com.salessavvy.sales_savvy_backend.entity.Category;
+import sales_savvy_backend.entity.Category;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
