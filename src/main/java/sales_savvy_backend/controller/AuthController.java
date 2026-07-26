@@ -33,4 +33,10 @@ public class AuthController {
         String role = jwtUtil.extractRole(token);
         return new AuthResponse(token, request.getEmail(), role);
     }
+    @PostMapping("/register-admin")
+    @ResponseStatus(HttpStatus.CREATED)
+    public String registerAdmin(@RequestBody RegisterRequest request) {
+        User user = authService.registerAdmin(request.getName(), request.getEmail(), request.getPassword());
+        return "Admin registered successfully with email: " + user.getEmail();
+    }
 }

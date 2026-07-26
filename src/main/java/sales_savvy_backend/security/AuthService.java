@@ -52,4 +52,21 @@ public class AuthService {
 
         return jwtUtil.generateToken(user.getEmail(), user.getRole().getName());
     }
+    public User registerAdmin(String name, String email, String rawPassword) {
+        if (userRepository.existsByEmail(email)) {
+            throw new RuntimeException("Email already registered");
+        }
+
+        Role adminRole = roleRepository.findByName("ADMIN")
+                .orElseThrow(() -> new RuntimeException("ADMIN role not found"));
+
+        User user = new User();
+        user.setName(name);
+        user.setEmail(email);
+        user.setPassword(passwordEncoder.encode(rawPassword));
+        user.setRole(adminRole);
+        user.setIsActive(true);
+
+        return userRepository.save(user);
+    }
 }
