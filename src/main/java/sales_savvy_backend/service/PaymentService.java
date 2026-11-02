@@ -5,12 +5,19 @@ import com.razorpay.RazorpayException;
 import org.json.JSONObject;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-
-import sales_savvy_backend.entity.*;
+import org.springframework.transaction.annotation.Transactional;
+import sales_savvy_backend.entity.Order;
+import sales_savvy_backend.entity.OrderStatus;
+import sales_savvy_backend.entity.Payment;
+import sales_savvy_backend.entity.PaymentStatus;
 import sales_savvy_backend.repository.OrderRepository;
 import sales_savvy_backend.repository.PaymentRepository;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -31,14 +38,23 @@ public class PaymentService {
         this.paymentRepository = paymentRepository;
     }
 
-    public Map<String, Object> createRazorpayOrder(Integer orderId) throws RazorpayException {
+    @Transactional
+    public Map<String, Object> createRazorpayOrder(Integer orderId, String email) throws RazorpayException {
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new RuntimeException("Order not found"));
 
+        // Same message for "missing" and "someone else's" so we do not reveal which orders exist
+        if (!order.getUser().getEmail().equals(email)) {
+            throw new RuntimeException("Order not found");
+        }
+        if (order.getStatus() != OrderStatus.PENDING) {
+            throw new RuntimeException("This order has already been paid or can no longer be paid");
+        }
+
         RazorpayClient client = new RazorpayClient(razorpayKeyId, razorpayKeySecret);
 
-        // Razorpay expects the amount in the smallest currency unit (paise for INR)
-        int amountInPaise = order.getTotalAmount().multiply(BigDecimal.valueOf(100)).intValue();
+        // Razorpay expects the amount in paise
+        long amountInPaise = order.getTotalAmount().multiply(BigDecimal.valueOf(100)).longValue();
 
         JSONObject orderRequest = new JSONObject();
         orderRequest.put("amount", amountInPaise);
@@ -46,34 +62,40 @@ public class PaymentService {
         orderRequest.put("receipt", "order_rcpt_" + order.getId());
 
         com.razorpay.Order razorpayOrder = client.orders.create(orderRequest);
+        String razorpayOrderId = razorpayOrder.get("id");
 
-        // Create a pending Payment record locally, linked to our order
         Payment payment = new Payment();
         payment.setOrder(order);
         payment.setPaymentMethod("RAZORPAY");
         payment.setStatus(PaymentStatus.INITIATED);
         payment.setAmount(order.getTotalAmount());
-        payment.setTransactionId(razorpayOrder.get("id"));
+        payment.setTransactionId(razorpayOrderId);
         paymentRepository.save(payment);
 
         Map<String, Object> response = new HashMap<>();
-        response.put("razorpayOrderId", razorpayOrder.get("id"));
+        response.put("razorpayOrderId", razorpayOrderId);
         response.put("amount", amountInPaise);
         response.put("currency", "INR");
         response.put("keyId", razorpayKeyId);
-
         return response;
     }
 
-    public Payment verifyAndCompletePayment(String razorpayOrderId, String razorpayPaymentId, String razorpaySignature) {
+    @Transactional
+    public Payment verifyAndCompletePayment(String razorpayOrderId, String razorpayPaymentId,
+                                            String razorpaySignature, String email) {
         Payment payment = paymentRepository.findAll().stream()
-                .filter(p -> razorpayOrderId.equals(p.getTransactionId()))
+                .filter(p -> razorpayOrderId != null && razorpayOrderId.equals(p.getTransactionId()))
                 .findFirst()
                 .orElseThrow(() -> new RuntimeException("Payment record not found"));
 
-        boolean isValid = verifySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature);
+        if (!payment.getOrder().getUser().getEmail().equals(email)) {
+            throw new RuntimeException("Payment record not found");
+        }
+        if (payment.getStatus() == PaymentStatus.SUCCESS) {
+            return payment;
+        }
 
-        if (isValid) {
+        if (isSignatureValid(razorpayOrderId, razorpayPaymentId, razorpaySignature)) {
             payment.setStatus(PaymentStatus.SUCCESS);
             payment.setTransactionId(razorpayPaymentId);
             payment.getOrder().setStatus(OrderStatus.APPROVED);
@@ -85,23 +107,20 @@ public class PaymentService {
         return paymentRepository.save(payment);
     }
 
-    private boolean verifySignature(String orderId, String paymentId, String signature) {
+    private boolean isSignatureValid(String orderId, String paymentId, String signature) {
         try {
-            String payload = orderId + "|" + paymentId;
-            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-            javax.crypto.spec.SecretKeySpec secretKeySpec =
-                    new javax.crypto.spec.SecretKeySpec(razorpayKeySecret.getBytes(), "HmacSHA256");
-            mac.init(secretKeySpec);
-            byte[] hash = mac.doFinal(payload.getBytes());
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(razorpayKeySecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] hash = mac.doFinal((orderId + "|" + paymentId).getBytes(StandardCharsets.UTF_8));
 
-            StringBuilder hexString = new StringBuilder();
+            StringBuilder hex = new StringBuilder();
             for (byte b : hash) {
-                String hex = Integer.toHexString(0xff & b);
-                if (hex.length() == 1) hexString.append('0');
-                hexString.append(hex);
+                hex.append(String.format("%02x", b));
             }
 
-            return hexString.toString().equals(signature);
+            return MessageDigest.isEqual(
+                    hex.toString().getBytes(StandardCharsets.UTF_8),
+                    signature.getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
             return false;
         }
